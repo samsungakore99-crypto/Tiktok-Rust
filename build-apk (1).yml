@@ -1,0 +1,81 @@
+name: Build APK
+
+# Builds an installable debug APK in the cloud. Works in two ways:
+#  1) the repository contains the project files (settings.gradle.kts at the root), or
+#  2) the repository contains just this file and the project .zip (it is unpacked automatically).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project
+        run: |
+          z=$(ls -1 *.zip 2>/dev/null | head -1 || true)
+          if [ -n "$z" ]; then
+            mkdir -p unpacked
+            unzip -q "$z" -d unpacked
+            dir=$(dirname "$(find unpacked -maxdepth 3 -name settings.gradle.kts | head -1)")
+          else
+            dir="."
+          fi
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+          echo "Project directory: $dir"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Unit tests (core)
+        continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+          set -o pipefail
+          gradle :core:test --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/logs/tests.log"
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+          set -o pipefail
+          gradle :app:assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
+
+      - name: Show errors in the run summary
+        if: failure()
+        run: |
+          {
+            echo '### Build errors (copy this and send it)'
+            echo '```'
+            grep -hE '^e: |error:|What went wrong|FAILED' -A2 logs/build.log logs/tests.log 2>/dev/null | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp "$PROJECT_DIR"/app/build/outputs/apk/debug/*.apk out/TikTokRust-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TikTokRust-debug-apk
+          path: out/TikTokRust-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: logs/
